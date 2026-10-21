@@ -103,6 +103,17 @@ ok "$GPU, $(uname -m), ${MEM_GB} GB"
 # machine's RAM holds the rest (docs/rtx-pro-6000.md); on a DGX Spark both are one 128 GB pool
 VRAM_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
 case "$VRAM_GB" in ''|*[!0-9]*) VRAM_GB="";; *) VRAM_GB=$((VRAM_GB / 1024));; esac
+# two or more cards (spark/gpus.py): the transformer on the first, the text encoder and decoders on the second, so
+# video needs their sum to reach a 96 GB card's and each to hold the transformer (40 GB or more a card)
+CARDS=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | grep -c '^[0-9][0-9]*$' || true)
+if [ -n "$VRAM_GB" ] && [ "${CARDS:-0}" -ge 2 ] && [ "${STUDIO_GPU_SPLIT:-auto}" != off ]; then
+  SMALLEST=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ' | sort -n | head -1)
+  SUM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | tr -d ' ' | awk '{s+=$1} END {print int(s/1024)}')
+  if [ $((SMALLEST / 1024)) -ge 40 ]; then
+    echo "  ! ${CARDS} cards, ${SUM} GB together: the stages of a render split over them (spark/gpus.py; STUDIO_GPU_SPLIT=off turns it off)"
+    VRAM_GB=$SUM
+  fi
+fi
 case "$GPU" in *GB10*) ;; *) if [ -n "$VRAM_GB" ]; then echo "  ! a ${VRAM_GB} GB card: measured on a DGX Spark and simulated as a 96 GB RTX Pro 6000, not run on one (docs/rtx-pro-6000.md)"
   else echo "  ! measured only on a DGX Spark (GB10, 128 GB unified memory); other GPUs are untested"; fi;; esac
 if [ -n "$VRAM_GB" ]; then

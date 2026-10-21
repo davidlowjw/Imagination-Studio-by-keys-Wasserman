@@ -210,12 +210,35 @@ def device(fresh: bool = False) -> dict | None:
         except ValueError:
             value = None
     else:
-        rows_ = smi("--query-gpu=memory.total,memory.used,memory.free")
-        if rows_ and all(part.isdigit() for part in rows_[0][:3]):
+        rows_ = [row for row in smi("--query-gpu=memory.total,memory.used,memory.free")
+                 if len(row) >= 3 and all(part.isdigit() for part in row[:3])]
+        if len(rows_) >= 2 and _split_allowed():
+            # two or more cards, each stage of a workflow placed on its card (spark/gpus.py): the job's room is all of
+            # them together; ``largest_free_mb`` is what one card has for an engine that runs on a single one
+            cards = [tuple(int(part) for part in row[:3]) for row in rows_]
+            value = {"total_mb": sum(c[0] for c in cards), "used_mb": sum(c[1] for c in cards),
+                     "free_mb": sum(c[2] for c in cards), "simulated": False, "cards": len(cards),
+                     "largest_free_mb": max(c[2] for c in cards), "card_total_mb": min(c[0] for c in cards)}
+        elif rows_:
             total, used, free = (int(part) for part in rows_[0][:3])
             value = {"total_mb": total, "used_mb": used, "free_mb": free, "simulated": False}
     _DEVICE.update(at=time.monotonic(), value=value)
     return value
+
+
+def _split_allowed() -> bool:
+    """Whether two or more cards are split (spark/gpus.py: STUDIO_GPU_SPLIT, on unless off)."""
+
+    return os.environ.get("STUDIO_GPU_SPLIT", "auto").strip().lower() not in ("0", "off", "no", "false")
+
+
+def single_card_free_mb() -> int | None:
+    """What the emptiest-to-fullest card has free: what an engine that runs on one card (Drama 3, Bolt) can use."""
+
+    card = device()
+    if card is None:
+        return None
+    return card.get("largest_free_mb", card["free_mb"])
 
 
 def discrete() -> bool:

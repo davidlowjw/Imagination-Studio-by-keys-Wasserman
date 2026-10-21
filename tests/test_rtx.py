@@ -42,6 +42,23 @@ def test_a_card_is_read_from_nvidia_smi(monkeypatch):
     assert memory_guard.discrete()
 
 
+def test_two_cards_are_one_pool_and_a_single_card_engine_sees_one(monkeypatch):
+    # spark/gpus.py: two 48 GB cards, the transformer on one and the text encoder and decoders on the other
+    monkeypatch.delenv("STUDIO_GPU_SPLIT", raising=False)
+
+    def smi(*query):
+        if query[0].startswith("--query-gpu"):
+            return [["48935", "22000", "26935"], ["48935", "400", "48535"]]
+        return []
+    monkeypatch.setattr(memory_guard, "smi", smi)
+    card = memory_guard.device()
+    assert card["total_mb"] == 97870 and card["free_mb"] == 75470 and card["cards"] == 2
+    assert memory_guard.single_card_free_mb() == 48535
+    monkeypatch.setattr(memory_guard, "_DEVICE", {"at": 0.0, "value": None})
+    monkeypatch.setenv("STUDIO_GPU_SPLIT", "off")  # the first card only, as before
+    assert memory_guard.device() == {"total_mb": 48935, "used_mb": 22000, "free_mb": 26935, "simulated": False}
+
+
 def test_a_dgx_spark_has_no_card_memory_of_its_own(monkeypatch):
     answers(monkeypatch, gpu=["[N/A]", "[N/A]", "[N/A]"])
     assert memory_guard.device() is None and not memory_guard.discrete() and memory_guard.device_room_mb() is None
