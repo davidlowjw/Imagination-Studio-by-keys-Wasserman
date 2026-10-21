@@ -12,6 +12,9 @@ Environment:
   STUDIO_GPU_SPLIT    auto (default: on with two or more discrete cards), on, off
   STUDIO_ENCODER_GPU  the card (ComfyUI's gpu:N index among the visible ones) for text encoders and decoders, default 1
   STUDIO_DECODER_GPU  the card for the decoders (VAEs) when it should differ from the encoders', default the same
+  STUDIO_LAYER_SPLIT  auto (default: on when the cards are split), off: MiniMax H3's bf16 transformer blocks from
+                      STUDIO_SPLIT_BLOCK (default 25) on run on the second card (spark/studio_split_h3)
+  STUDIO_LAYER_GPU    the card for those blocks, default STUDIO_ENCODER_GPU
 """
 
 from __future__ import annotations
@@ -25,6 +28,9 @@ CLIP_OUTPUTS = {"CLIPLoader": (0,), "DualCLIPLoader": (0,), "TripleCLIPLoader": 
                 "CheckpointLoaderSimple": (1,), "ImageOnlyCheckpointLoader": ()}
 VAE_OUTPUTS = {"VAELoader": (0,), "CheckpointLoaderSimple": (2,), "ImageOnlyCheckpointLoader": (2,)}
 _CARDS: dict = {"at": 0.0, "value": []}
+# nodes that take a MODEL and give one back (the layer split goes after them, so it sees their patches)
+MODEL_STEPS = {"UNETLoader", "MiniMaxH3SigmaShift", "LoraLoaderModelOnly", "LoraLoader", "BlockSparseAttention",
+               "SelectModelDevice", "StudioSplitH3Blocks", "TensorFoldH3Blocks", "ModelSamplingSD3", "ModelSamplingFlux"}
 
 
 def cards(fresh: bool = False) -> list[dict]:
@@ -101,7 +107,7 @@ def place(workflow: dict) -> dict:
             if (key, slot) not in placed:
                 routes[(key, slot)] = ("SelectVAEDevice", "vae", f"gpu:{decoder_gpu()}")
     if not routes:
-        return out
+        return place_layers(out) if layer_split() else out
     new_ids = {}
     for (key, slot), (kind, field, device) in routes.items():
         new_id = str(next_id)
@@ -114,6 +120,69 @@ def place(workflow: dict) -> dict:
         for name, value in node["inputs"].items():
             if isinstance(value, list) and len(value) == 2 and (str(value[0]), value[1]) in new_ids:
                 node["inputs"][name] = [new_ids[(str(value[0]), value[1])], 0]
+    return place_layers(out) if layer_split() else out
+
+
+def layer_split() -> bool:
+    return split() and os.environ.get("STUDIO_LAYER_SPLIT", "auto").strip().lower() not in ("0", "off", "no", "false")
+
+
+def split_block() -> int:
+    try:
+        return int(os.environ.get("STUDIO_SPLIT_BLOCK", "25"))
+    except ValueError:
+        return 25
+
+
+def layer_gpu() -> int:
+    try:
+        return int(os.environ.get("STUDIO_LAYER_GPU", str(encoder_gpu())))
+    except ValueError:
+        return encoder_gpu()
+
+
+def h3_bf16(name: str) -> bool:
+    """A MiniMax H3-family transformer in bf16 (FastH3, H3's own FL2VA, Ref2VA): what the layer split takes."""
+    low = name.lower()
+    return ("minimax_h3" in low or "fasth3" in low) and "bf16" in low and "int8" not in low and "fp8" not in low
+
+
+def place_layers(out: dict) -> dict:
+    """Each final use of an H3 bf16 model (a guider, a scheduler, a sampler, an action's own node) reads it through
+    StudioSplitH3Blocks, unless TensorFold's engine already holds its blocks or a split is there already."""
+
+    def chain(ref):
+        seen = []
+        while isinstance(ref, list) and len(ref) == 2 and str(ref[0]) in out:
+            node = out[str(ref[0])]
+            seen.append(node)
+            if node.get("class_type") == "UNETLoader":
+                return seen
+            ref = node["inputs"].get("model")
+        return None
+
+    taken = {int(key) for key in out if str(key).isdigit()}
+    next_id = max(taken, default=0) + 2000
+    new_for = {}
+    for node_id, node in list(out.items()):
+        if node.get("class_type") in MODEL_STEPS:
+            continue
+        ref = node["inputs"].get("model")
+        if not (isinstance(ref, list) and len(ref) == 2):
+            continue
+        found = chain(ref)
+        if not found or not h3_bf16(str(found[-1]["inputs"].get("unet_name", ""))):
+            continue
+        if any(n.get("class_type") in ("TensorFoldH3Blocks", "StudioSplitH3Blocks") for n in found):
+            continue
+        key = (str(ref[0]), ref[1])
+        if key not in new_for:
+            new_for[key] = str(next_id)
+            out[str(next_id)] = {"class_type": "StudioSplitH3Blocks",
+                                 "inputs": {"model": [key[0], key[1]], "unet_name": found[-1]["inputs"]["unet_name"],
+                                            "split": split_block(), "device": f"gpu:{layer_gpu()}"}}
+            next_id += 1
+        node["inputs"]["model"] = [new_for[key], 0]
     return out
 
 
@@ -124,7 +193,8 @@ def describe() -> str:
     if not split():
         return "one card" if len(found) <= 1 else f"{len(found)} cards, split off (STUDIO_GPU_SPLIT)"
     return (f"{len(found)} cards: diffusion model on gpu:0, text encoders on gpu:{encoder_gpu()}, "
-            f"decoders on gpu:{decoder_gpu()}")
+            f"decoders on gpu:{decoder_gpu()}"
+            + (f"; a bf16 H3 transformer's blocks {split_block()}+ on gpu:{layer_gpu()}" if layer_split() else ""))
 
 
 if __name__ == "__main__":

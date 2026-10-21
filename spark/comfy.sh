@@ -38,6 +38,10 @@ case "${1:-start}" in
       mkdir -p "$NODE" && cp "$HERE/tensorfold_h3/__init__.py" "$NODE/"
       export TF_H3_LIB="$PREFIX/tf-h3/libtf_h3.so"
     fi
+    # two cards: the second part of MiniMax H3's bf16 transformer blocks on the second card (spark/gpus.py)
+    NODE="$PREFIX/ComfyUI/custom_nodes/studio_split_h3"
+    rm -rf "$NODE"
+    mkdir -p "$NODE" && cp "$HERE/studio_split_h3/__init__.py" "$NODE/"
     # the Studio's MMAudio sampler (foley), beside kijai's ComfyUI-MMAudio when oneshot-setup-spark.sh --sound put it there
     NODE="$PREFIX/ComfyUI/custom_nodes/studio_mmaudio"
     rm -rf "$NODE"

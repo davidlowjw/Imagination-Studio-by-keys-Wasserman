@@ -93,6 +93,45 @@ def test_a_workflow_that_places_itself_is_not_placed_twice(monkeypatch):
     assert gpus.place(w) == w
 
 
+def bf16_video_workflow(engine=False):
+    w = video_workflow()
+    w["1"]["inputs"]["unet_name"] = "fastvideo_fasth3_8step_v2_pruned_bf16.safetensors"
+    w["2"] = {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["1", 0]}}
+    w["30"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["2", 0], "lora_name": "x"}}
+    last = ["30", 0]
+    if engine:
+        w["22"] = {"class_type": "TensorFoldH3Blocks", "inputs": {"model": last, "unet_name": "x", "sparsity": 0.8}}
+        last = ["22", 0]
+    w["10"] = {"class_type": "BasicScheduler", "inputs": {"model": last, "steps": 8}}
+    w["11"] = {"class_type": "CFGGuider", "inputs": {"model": last, "positive": ["6", 0]}}
+    return w
+
+
+def test_a_bf16_h3_transformer_is_split_after_its_lora(monkeypatch):
+    with_cards(monkeypatch, TWO)
+    monkeypatch.delenv("STUDIO_LAYER_SPLIT", raising=False)
+    monkeypatch.setenv("STUDIO_SPLIT_BLOCK", "20")
+    out = gpus.place(bf16_video_workflow())
+    splits = {k: n for k, n in out.items() if n["class_type"] == "StudioSplitH3Blocks"}
+    assert len(splits) == 1
+    (key, node), = splits.items()
+    assert node["inputs"]["model"] == ["30", 0] and node["inputs"]["split"] == 20 and node["inputs"]["device"] == "gpu:1"
+    assert node["inputs"]["unet_name"] == "fastvideo_fasth3_8step_v2_pruned_bf16.safetensors"
+    assert out["10"]["inputs"]["model"] == [key, 0] and out["11"]["inputs"]["model"] == [key, 0]
+    assert out["30"]["inputs"]["model"] == ["2", 0]  # the steps before it are untouched
+
+
+def test_no_layer_split_on_the_int8_engine_an_int8_file_or_when_off(monkeypatch):
+    with_cards(monkeypatch, TWO)
+    monkeypatch.delenv("STUDIO_LAYER_SPLIT", raising=False)
+    assert not any(n["class_type"] == "StudioSplitH3Blocks" for n in gpus.place(bf16_video_workflow(engine=True)).values())
+    w = bf16_video_workflow()
+    w["1"]["inputs"]["unet_name"] = "fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors"
+    assert not any(n["class_type"] == "StudioSplitH3Blocks" for n in gpus.place(w).values())
+    monkeypatch.setenv("STUDIO_LAYER_SPLIT", "off")
+    assert not any(n["class_type"] == "StudioSplitH3Blocks" for n in gpus.place(bf16_video_workflow()).values())
+
+
 def test_the_simulation_of_one_card_never_splits(monkeypatch):
     with_cards(monkeypatch, TWO)
     monkeypatch.setenv("STUDIO_VRAM_GB", "96")
