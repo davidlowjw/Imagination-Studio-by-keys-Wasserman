@@ -27,7 +27,10 @@ case "${1:-start}" in
       for _ in $(seq 1 25); do pgrep -f "$MATCH" >/dev/null || break; sleep 1; done
       MATCH="^[^ ]+ main\.py --listen 127\.0\.0\.1 --port $PORT( |\$)"
     fi
-    pkill -f "$MATCH" 2>/dev/null && echo "stopped" || echo "not running"; rm -f "$PREFIX/comfy.kind";;
+    pkill -f "$MATCH" 2>/dev/null && echo "stopped" || echo "not running"; rm -f "$PREFIX/comfy.kind"
+    # a two-GPU world's shared memory (spark/tensorfold_h3/tp.py) is RAM until it is unlinked: its server is gone now
+    for _ in $(seq 1 10); do pgrep -f "$MATCH" >/dev/null || break; sleep 1; done
+    pgrep -f "$MATCH" >/dev/null || rm -f /dev/shm/tf-h3-* 2>/dev/null;;
   status) pgrep -f "$MATCH" >/dev/null && echo "running on 127.0.0.1:$PORT" || echo "not running";;
   run)
     export PATH="/usr/local/cuda/bin:$PATH" CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}" MAX_JOBS="${MAX_JOBS:-2}"

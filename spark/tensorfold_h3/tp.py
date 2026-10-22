@@ -58,6 +58,27 @@ def address(box):
     return ctypes.addressof(ctypes.c_char.from_buffer(box))
 
 
+def sweep():
+    """The worlds of ComfyUI servers that are gone (killed before they could close theirs): their shared memory is
+    RAM held until it is unlinked. A world's name carries its server's pid (tf-h3-<pid>-<id>)."""
+    try:
+        names = os.listdir("/dev/shm")
+    except OSError:
+        return
+    for name in names:
+        parts = name.split("-")
+        if len(parts) >= 4 and parts[0] == "tf" and parts[1] == "h3" and parts[2].isdigit():
+            try:
+                os.kill(int(parts[2]), 0)
+            except ProcessLookupError:
+                try:
+                    os.unlink("/dev/shm/" + name)
+                except OSError:
+                    pass
+            except PermissionError:
+                pass
+
+
 def unlink(name):
     base = "/dev/shm/" + name.lstrip("/")
     for path in (base, base + ".ctl", base + ".box"):

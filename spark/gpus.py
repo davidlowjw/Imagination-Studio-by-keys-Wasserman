@@ -12,7 +12,7 @@ Environment:
   STUDIO_GPU_SPLIT    auto (default: on with two or more discrete cards), on, off
   STUDIO_ENCODER_GPU  the card (ComfyUI's gpu:N index among the visible ones) for text encoders and decoders, default 1
   STUDIO_DECODER_GPU  the card for the decoders (VAEs) when it should differ from the encoders', default the same
-  STUDIO_LAYER_SPLIT  auto (default: on when the cards are split), off: MiniMax H3's bf16 transformer blocks from
+  STUDIO_LAYER_SPLIT  off (default), on: MiniMax H3's bf16 transformer blocks from
                       STUDIO_SPLIT_BLOCK (default 25) on run on the second card (spark/studio_split_h3)
   STUDIO_LAYER_GPU    the card for those blocks, default STUDIO_ENCODER_GPU
 """
@@ -124,7 +124,9 @@ def place(workflow: dict) -> dict:
 
 
 def layer_split() -> bool:
-    return split() and os.environ.get("STUDIO_LAYER_SPLIT", "auto").strip().lower() not in ("0", "off", "no", "false")
+    """Off unless asked for (STUDIO_LAYER_SPLIT=on): measured slower than one card on plain clips, and with sparse
+    attention (1344x768 and up) its clip differs from the unsplit one's (PSNR 14 dB, same seed), not yet explained."""
+    return split() and os.environ.get("STUDIO_LAYER_SPLIT", "off").strip().lower() in ("1", "on", "yes", "true")
 
 
 def split_block() -> int:

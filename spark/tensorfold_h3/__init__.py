@@ -97,6 +97,7 @@ class World:
     def __init__(self, path, handle):
         import subprocess
         import signal
+        tp.sweep()
         self.name = f"tf-h3-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self.region = int(float(os.environ.get("STUDIO_TP_REGION_GB", "4")) * (1 << 30))
         self.box = tp.open_box(self.name, create=True)

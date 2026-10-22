@@ -107,9 +107,15 @@ def bf16_video_workflow(engine=False):
     return w
 
 
-def test_a_bf16_h3_transformer_is_split_after_its_lora(monkeypatch):
+def test_the_layer_split_is_off_unless_asked_for(monkeypatch):
     with_cards(monkeypatch, TWO)
     monkeypatch.delenv("STUDIO_LAYER_SPLIT", raising=False)
+    assert not any(n["class_type"] == "StudioSplitH3Blocks" for n in gpus.place(bf16_video_workflow()).values())
+
+
+def test_a_bf16_h3_transformer_is_split_after_its_lora(monkeypatch):
+    with_cards(monkeypatch, TWO)
+    monkeypatch.setenv("STUDIO_LAYER_SPLIT", "on")
     monkeypatch.setenv("STUDIO_SPLIT_BLOCK", "20")
     out = gpus.place(bf16_video_workflow())
     splits = {k: n for k, n in out.items() if n["class_type"] == "StudioSplitH3Blocks"}
@@ -123,7 +129,7 @@ def test_a_bf16_h3_transformer_is_split_after_its_lora(monkeypatch):
 
 def test_no_layer_split_on_the_int8_engine_an_int8_file_or_when_off(monkeypatch):
     with_cards(monkeypatch, TWO)
-    monkeypatch.delenv("STUDIO_LAYER_SPLIT", raising=False)
+    monkeypatch.setenv("STUDIO_LAYER_SPLIT", "on")
     assert not any(n["class_type"] == "StudioSplitH3Blocks" for n in gpus.place(bf16_video_workflow(engine=True)).values())
     w = bf16_video_workflow()
     w["1"]["inputs"]["unet_name"] = "fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors"
