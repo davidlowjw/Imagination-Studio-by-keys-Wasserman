@@ -59,6 +59,26 @@ def test_two_cards_are_one_pool_and_a_single_card_engine_sees_one(monkeypatch):
     assert memory_guard.device() == {"total_mb": 48935, "used_mb": 22000, "free_mb": 26935, "simulated": False}
 
 
+def test_the_servers_child_processes_count_as_the_jobs(monkeypatch):
+    # a two-GPU pass: ComfyUI (pid 10) holds 25 GB on the first card, its rank 1 (pid 11) 22 GB on the second; a
+    # stranger (pid 99) holds 5 GB. Only the stranger's memory is not the job's.
+    monkeypatch.setattr(memory_guard, "device", lambda fresh=False: {"total_mb": 96 * GB, "used_mb": 52 * GB,
+                                                                     "free_mb": 44 * GB, "simulated": False})
+    monkeypatch.setattr(memory_guard, "server_pid", lambda: 10)
+    monkeypatch.setattr(memory_guard, "family", lambda pid: {10, 11})
+    monkeypatch.setattr(memory_guard, "processes_mb", lambda: {10: 25 * GB, 11: 22 * GB, 99: 5 * GB})
+    assert memory_guard.device_room_mb() == (44 + 25 + 22) * GB - memory_guard.VRAM_MARGIN_MB
+
+
+def test_family_finds_a_process_and_its_children():
+    import subprocess
+    child = subprocess.Popen(["sleep", "5"])
+    try:
+        assert {os.getpid(), child.pid} <= memory_guard.family(os.getpid())
+    finally:
+        child.kill()
+
+
 def test_a_dgx_spark_has_no_card_memory_of_its_own(monkeypatch):
     answers(monkeypatch, gpu=["[N/A]", "[N/A]", "[N/A]"])
     assert memory_guard.device() is None and not memory_guard.discrete() and memory_guard.device_room_mb() is None

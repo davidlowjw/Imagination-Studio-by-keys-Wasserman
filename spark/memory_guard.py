@@ -165,6 +165,31 @@ def server_pid() -> int | None:
     return None
 
 
+def family(pid: int) -> set[int]:
+    """``pid`` and every process under it (the ComfyUI server's own: the second card's rank, spark/tensorfold_h3/tp.py)."""
+
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {pid}
+    for name in entries:
+        if name.isdigit():
+            try:
+                with open(f"/proc/{name}/stat", "rb") as handle:
+                    parent = int(handle.read().rsplit(b")", 1)[1].split()[1])
+                children.setdefault(parent, []).append(int(name))
+            except (OSError, ValueError, IndexError):
+                pass
+    found, todo = set(), [pid]
+    while todo:
+        one = todo.pop()
+        if one not in found:
+            found.add(one)
+            todo.extend(children.get(one, []))
+    return found
+
+
 # ---------- a discrete GPU: an NVIDIA card with memory of its own (an RTX Pro 6000 Blackwell, 96 GB) ----------
 # A DGX Spark's GB10 has one memory for the CPU and the GPU (nvidia-smi says [N/A] for the GPU's), and everything above
 # reads it as /proc/meminfo. A card with its own memory is full long before the machine's RAM is: there a job's room is
@@ -253,7 +278,9 @@ def device_room_mb() -> int | None:
     if card is None:
         return None
     pid = server_pid()
-    held = processes_mb().get(pid, 0) if pid else 0
+    used = processes_mb()
+    # what the server holds, its own processes too (the second card's rank of a two-GPU pass): all of it is the job's
+    held = sum(used.get(one, 0) for one in family(pid)) if pid else 0
     return max(0, card["free_mb"] + held - VRAM_MARGIN_MB)
 
 

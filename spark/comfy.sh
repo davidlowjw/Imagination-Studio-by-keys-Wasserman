@@ -35,7 +35,7 @@ case "${1:-start}" in
     NODE="$PREFIX/ComfyUI/custom_nodes/tensorfold_h3"
     rm -rf "$NODE"
     if [ -s "$PREFIX/tf-h3/libtf_h3.so" ]; then
-      mkdir -p "$NODE" && cp "$HERE/tensorfold_h3/__init__.py" "$NODE/"
+      mkdir -p "$NODE" && cp "$HERE/tensorfold_h3/"*.py "$NODE/"  # the node, and the two-GPU world (tp.py, tp_rank.py)
       export TF_H3_LIB="$PREFIX/tf-h3/libtf_h3.so"
     fi
     # two cards: the second part of MiniMax H3's bf16 transformer blocks on the second card (spark/gpus.py)
