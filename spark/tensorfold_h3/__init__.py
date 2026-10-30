@@ -114,6 +114,7 @@ class World:
         visible = [part.strip() for part in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if part.strip()]
         # peer to peer opens rank 0's region on rank 0's card, so rank 1 sees that card too (its own still first: device 0)
         cards = f"{two},{visible[0]}" if self.kind == "p2p" and visible and visible[0] != two else two
+        cards = os.environ.get("STUDIO_TP_RANK1_CARDS", "").strip() or cards  # a diagnostic: rank 1's CUDA_VISIBLE_DEVICES
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": cards,
                "TF_H3_LIB": os.environ.get("TF_H3_LIB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "libtf_h3.so")}
         libc = ctypes.CDLL(None)
@@ -165,9 +166,11 @@ _tp_off = set()  # checkpoint paths whose two-GPU world failed this session: one
 
 
 def exchange_kind():
-    """p2p when the engine has it (tf_h3_tp_p2p) and STUDIO_TP_EXCHANGE is not shm, else shm."""
-    wanted = os.environ.get("STUDIO_TP_EXCHANGE", "auto").strip().lower()
-    if wanted == "shm" or not hasattr(library(), "tf_h3_tp_p2p"):
+    """shm unless STUDIO_TP_EXCHANGE=p2p and the engine has it (tf_h3_tp_p2p). Peer to peer is opt-in: on two RTX PRO
+    5000 behind a host bridge (driver 595.99) cross-GPU copies through CUDA IPC, cuMemcpyPeer and peer-enabled
+    cuMemcpyDtoD report success and move nothing (tests/tf_h3_tp_rig.py: every row differs after one block)."""
+    wanted = os.environ.get("STUDIO_TP_EXCHANGE", "shm").strip().lower()
+    if wanted != "p2p" or not hasattr(library(), "tf_h3_tp_p2p"):
         return "shm"
     return "p2p"
 
@@ -369,6 +372,13 @@ class Blocks:
                         tiles=sizes.shape[0], prefix_tiles=prefix, keep=keep, blocks=blocks, attention_out=0)
         handle = engine(self.path)
         merge(handle, self.path, self.patches)
+        capture = os.environ.get("TF_H3_CAPTURE", "").strip()
+        if capture and not os.path.exists(capture) and not self.patches and blocks == 0:
+            # the test rig (tests/tf_h3_tp_rig.py): this pass's inputs, to replay outside ComfyUI on one GPU and two
+            torch.save({"path": self.path, "h": h.detach().cpu().clone(), "tables": tables.cpu(), "line": line.cpu(),
+                        "cos": cos.cpu(), "sin": sin.cpu(), "slot": slot.cpu(), "sizes": sizes.cpu(), "prefix": int(prefix),
+                        "keep": int(keep), "lines": int(tables.shape[1]), "rot": int(cos.shape[1])}, capture)
+            logging.info(f"TensorFold H3: this pass's inputs saved to {capture} ({rows} rows, {sizes.shape[0]} tiles)")
         # two GPUs: the pass split by tile (tp.py); not with a LoRA (the second card holds the checkpoint's weights)
         # nor for the checks' partial passes
         w = world(self.path) if not self.patches and blocks == 0 else None
