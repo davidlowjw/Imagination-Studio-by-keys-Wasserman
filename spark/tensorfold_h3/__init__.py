@@ -166,13 +166,16 @@ _tp_off = set()  # checkpoint paths whose two-GPU world failed this session: one
 
 
 def exchange_kind():
-    """shm unless STUDIO_TP_EXCHANGE=p2p and the engine has it (tf_h3_tp_p2p). Peer to peer is opt-in: on two RTX PRO
-    5000 behind a host bridge (driver 595.99) cross-GPU copies through CUDA IPC, cuMemcpyPeer and peer-enabled
-    cuMemcpyDtoD report success and move nothing (tests/tf_h3_tp_rig.py: every row differs after one block)."""
+    """STUDIO_TP_EXCHANGE: shm (default: kernels pack into and unpack out of the shared host region), dma (the same
+    region, filled and read with bulk copy-engine copies; engine tf_h3_tp_dma) or p2p (GPU to GPU; engine tf_h3_tp_p2p).
+    p2p is opt-in only: on two RTX PRO 5000 behind a host bridge (driver 595.99) cross-GPU copies through CUDA IPC,
+    cuMemcpyPeer and peer-enabled cuMemcpyDtoD report success and move nothing (tests/tf_h3_tp_rig.py)."""
     wanted = os.environ.get("STUDIO_TP_EXCHANGE", "shm").strip().lower()
-    if wanted != "p2p" or not hasattr(library(), "tf_h3_tp_p2p"):
-        return "shm"
-    return "p2p"
+    if wanted == "dma" and hasattr(library(), "tf_h3_tp_dma"):
+        return "dma"
+    if wanted == "p2p" and hasattr(library(), "tf_h3_tp_p2p"):
+        return "p2p"
+    return "shm"
 
 
 def rank_one_gpu():
@@ -203,9 +206,9 @@ def world(path):
         try:
             _worlds[path] = World(path, engine(path))
         except Exception as error:  # noqa: BLE001
-            if exchange_kind() == "p2p":
-                # peer to peer refused (no P2P between these cards, IPC off): the host shared-memory exchange instead
-                logging.warning(f"TensorFold H3: the peer-to-peer exchange failed ({error}); trying shared memory")
+            if exchange_kind() != "shm":
+                # dma or peer to peer refused: the plain shared-memory exchange instead
+                logging.warning(f"TensorFold H3: the {exchange_kind()} exchange failed ({error}); trying shared memory")
                 os.environ["STUDIO_TP_EXCHANGE"] = "shm"
                 return world(path)
             logging.warning(f"TensorFold H3: two GPUs unavailable, one GPU from here: {error}")
