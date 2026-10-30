@@ -165,16 +165,33 @@ _worlds = {}    # checkpoint path -> World, while ComfyUI runs
 _tp_off = set()  # checkpoint paths whose two-GPU world failed this session: one GPU for them from then on
 
 
+def iommu_passthrough():
+    """True when no IOMMU translates the NVIDIA GPUs' DMA (no IOMMU group, or group type identity: iommu=pt). With the
+    IOMMU translating (AMD-Vi / VT-d DMA, DMA-FQ), CUDA peer copies report success and move nothing (CUDA guide:
+    P2P is unsupported on bare-metal Linux with the IOMMU on)."""
+    import glob
+    gpus = [d for d in glob.glob("/sys/bus/pci/devices/*") if open(d + "/vendor").read().strip() == "0x10de"
+            and open(d + "/class").read().strip().startswith("0x03")]
+    for d in gpus:
+        kind = os.path.join(d, "iommu_group", "type")
+        if os.path.exists(kind) and open(kind).read().strip() != "identity":
+            return False
+    return bool(gpus)
+
+
 def exchange_kind():
-    """STUDIO_TP_EXCHANGE: shm (default: kernels pack into and unpack out of the shared host region), dma (the same
-    region, filled and read with bulk copy-engine copies; engine tf_h3_tp_dma) or p2p (GPU to GPU; engine tf_h3_tp_p2p).
-    p2p is opt-in only: on two RTX PRO 5000 behind a host bridge (driver 595.99) cross-GPU copies through CUDA IPC,
-    cuMemcpyPeer and peer-enabled cuMemcpyDtoD report success and move nothing (tests/tf_h3_tp_rig.py)."""
+    """STUDIO_TP_EXCHANGE: shm (kernels pack into and unpack out of the shared host region), dma (the same region,
+    filled and read with bulk copy-engine copies; engine tf_h3_tp_dma) or p2p (GPU to GPU; engine tf_h3_tp_p2p).
+    p2p is used only when the GPUs' IOMMU groups pass through (iommu=pt), else dma: translated, peer copies move nothing."""
     wanted = os.environ.get("STUDIO_TP_EXCHANGE", "shm").strip().lower()
-    if wanted == "dma" and hasattr(library(), "tf_h3_tp_dma"):
+    lib = library()
+    if wanted == "p2p" and hasattr(lib, "tf_h3_tp_p2p"):
+        if iommu_passthrough():
+            return "p2p"
+        logging.warning("TensorFold H3: STUDIO_TP_EXCHANGE=p2p but the IOMMU translates the GPUs (boot with iommu=pt); using dma")
+        wanted = "dma"
+    if wanted == "dma" and hasattr(lib, "tf_h3_tp_dma"):
         return "dma"
-    if wanted == "p2p" and hasattr(library(), "tf_h3_tp_p2p"):
-        return "p2p"
     return "shm"
 
 
