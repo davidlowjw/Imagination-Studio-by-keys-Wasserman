@@ -59,8 +59,19 @@ def main():
                            tile0=head.tile0, tile1=head.tile1)
         for i in range(9):
             inputs.cuts[i] = head.cuts[i]
+        profile = os.environ.get("TF_H3_PROFILE") == "1" and hasattr(lib, "tf_h3_profile")
+        if profile:
+            lib.tf_h3_profile(model, 1)
         took = lib.tf_h3_forward_host(model, ctypes.byref(inputs))
         head.took = took
+        if profile:
+            spent, names = (ctypes.c_double * 16)(), (ctypes.c_char_p * 16)()
+            head.spent_n = lib.tf_h3_spent(model, ctypes.byref(spent), ctypes.byref(names))
+            for i in range(16):
+                head.spent[i] = spent[i]
+            lib.tf_h3_profile(model, 0)
+        for i, value in enumerate(tp.stats(lib, model)):
+            head.tp_stats[i] = value
         say(0 if took >= 0 else -1, "" if took >= 0 else f"rank {rank}: the forward failed")
         head.done = seen
     lib.tf_h3_tp_close(model)

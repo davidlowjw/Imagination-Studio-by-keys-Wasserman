@@ -370,6 +370,7 @@ class Blocks:
         """One pass on two GPUs: rank 1 takes the tiles from ``cut`` on (about half the rows), rank 0 the rest; ``h``
         is written only once both are done, so a failure leaves it as it was."""
         tiles = sizes.shape[0]
+        clock = [time.perf_counter()]
         cum = torch.cumsum(sizes.to(torch.int64), 0)
         cut = int(torch.searchsorted(cum, cum[-1] // 2).item()) + 1
         cut = max(1, min(cut, tiles - 1))
@@ -399,6 +400,7 @@ class Blocks:
             head.cuts[i] = cuts[i] if i < 3 else 0
         job = (head.job + 1) & 0xffffffff
         head.job = job
+        clock.append(time.perf_counter())  # rank 1's job in the mailbox
         # rank 0's half here, at the same time
         mine = [h.index_select(0, own[0]).contiguous(), line.index_select(0, own[0]).contiguous(),
                 cos.index_select(0, own[0]).contiguous(), sin.index_select(0, own[0]).contiguous(),
@@ -410,19 +412,35 @@ class Blocks:
         for i in range(9):
             inputs.cuts[i] = cuts[i] if i < 3 else 0
         torch.cuda.synchronize()
+        clock.append(time.perf_counter())  # rank 0's rows ready
         took = library().tf_h3_forward(handle, ctypes.byref(inputs))
         mark = time.perf_counter()
+        clock.append(mark)  # rank 0's forward done
         while head.done != job:
             if w.proc.poll() is not None:
                 raise RuntimeError(f"rank 1 exited ({w.proc.returncode}): {head.message.decode(errors='replace')}")
             if time.perf_counter() - mark > 120:
                 raise RuntimeError("rank 1 did not finish the pass in 120 s")
             time.sleep(0.0005)
+        clock.append(time.perf_counter())  # rank 1 done
         if took < 0 or head.status < 0:
             raise RuntimeError(f"the forward failed: rank 0 {took:.2f}, rank 1 {head.message.decode(errors='replace')}")
         theirs = w.view(offsets[0], torch.bfloat16, own[1].numel() * hidden).view(-1, hidden).to(h.device)
         h.index_copy_(0, own[0], mine[0])
         h.index_copy_(0, own[1], theirs)
+        if os.environ.get("TF_H3_PROFILE") == "1" or self.passes == 0:
+            torch.cuda.synchronize()
+            clock.append(time.perf_counter())  # h written back
+            d = [b - a for a, b in zip(clock, clock[1:])]
+            mine_x, theirs_x = tp.stats(library(), handle), tuple(head.tp_stats)
+            line_ = (f"TensorFold H3 two-GPU pass {self.passes + 1}: {clock[-1] - clock[0]:.2f} s = mailbox {d[0]:.3f} "
+                     f"+ own rows {d[1]:.3f} + rank 0 forward {d[2]:.2f} + waiting for rank 1 {d[3]:.3f} "
+                     f"+ write back {d[4]:.3f}; exchanges rank 0 {mine_x[0]:.2f} s in {int(mine_x[1])} "
+                     f"(packing {mine_x[2]:.2f}), rank 1 {theirs_x[0]:.2f} s in {int(theirs_x[1])} (packing {theirs_x[2]:.2f}); "
+                     f"rank 1 forward {head.took:.2f} s")
+            if head.spent_n:
+                line_ += f"; rank 1 stages: {tp.spent_line(head.spent, head.spent_n)}"
+            logging.info(line_)
         if self.passes == 0:
             logging.info(f"TensorFold H3: two GPUs, tiles 0-{cut - 1} ({own[0].numel()} rows) here and {cut}-{tiles - 1} "
                          f"({own[1].numel()} rows) on rank 1; rank 0 {took:.2f} s, rank 1 {head.took:.2f} s")

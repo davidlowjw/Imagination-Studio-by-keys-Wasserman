@@ -39,7 +39,9 @@ class Header(ctypes.Structure):
                 ("prefix_tiles", ctypes.c_uint32), ("keep", ctypes.c_uint32), ("blocks", ctypes.c_uint32),
                 ("tile0", ctypes.c_uint32), ("tile1", ctypes.c_uint32), ("cuts", ctypes.c_uint32 * 9),
                 # byte offsets in the mailbox of x, tables, line, cos, sin, slot, sizes
-                ("at", ctypes.c_uint64 * 7), ("message", ctypes.c_char * 512)]
+                ("at", ctypes.c_uint64 * 7), ("message", ctypes.c_char * 512),
+                # TF_H3_PROFILE=1: rank 1's last pass, as tf_h3_spent and tf_h3_tp_stats report it
+                ("spent", ctypes.c_double * 16), ("spent_n", ctypes.c_uint32), ("tp_stats", ctypes.c_double * 3)]
 
 
 def open_box(name, create):
@@ -108,4 +110,23 @@ def bind(lib):
     lib.tf_h3_tp_connect.restype = ctypes.c_int
     lib.tf_h3_tp_connect.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint8 * 72)]
     lib.tf_h3_tp_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double * 3)]
+    if hasattr(lib, "tf_h3_profile"):
+        lib.tf_h3_profile.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.tf_h3_spent.restype = ctypes.c_int
+        lib.tf_h3_spent.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     return lib
+
+
+def stats(lib, model):
+    """(seconds in the last forward's exchanges, how many, seconds of those packing) for this rank."""
+    out = (ctypes.c_double * 3)()
+    lib.tf_h3_tp_stats(model, ctypes.byref(out))
+    return tuple(out)
+
+
+STAGES = ("norms", "q k v gate", "heads", "routing", "attention", "gate mix", "attention out", "mlp in", "quantize",
+          "mlp out", "exchange")
+
+
+def spent_line(values, n, names=STAGES):
+    return ", ".join(f"{names[i] if i < len(names) else i} {values[i]:.2f}" for i in range(n))
