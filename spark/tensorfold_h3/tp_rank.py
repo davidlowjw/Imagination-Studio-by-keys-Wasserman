@@ -1,6 +1,6 @@
 """Rank 1 of a two-GPU pass (tp.py): the second card's half of FastH3's blocks, as a process of its own.
 
-    CUDA_VISIBLE_DEVICES=1 TF_H3_LIB=... python tp_rank.py NAME INT8_PATH REGION_BYTES WORLD RANK
+    CUDA_VISIBLE_DEVICES=1 TF_H3_LIB=... python tp_rank.py NAME INT8_PATH REGION_BYTES WORLD RANK [shm|p2p]
 
 Opens the int8 copy of the blocks on its card, joins the world over shared memory ("shm:/NAME"), says it is ready in
 the mailbox and then runs every job rank 0 puts there until rank 0 asks it to stop or goes away.
@@ -17,6 +17,7 @@ import tp  # noqa: E402
 
 def main():
     name, path, region, world, rank = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+    kind = sys.argv[6] if len(sys.argv) > 6 else "shm"  # the exchange: shm (host shared memory) or p2p (GPU to GPU)
     parent = os.getppid()
     box = tp.open_box(name, create=False)
     head = tp.Header.from_buffer(box)
@@ -33,7 +34,7 @@ def main():
         say(-1, f"rank {rank}: tf_h3_open {path} failed")
         head.ready = 2
         return 1
-    if lib.tf_h3_tp_init(model, f"shm:/{name}".encode(), 0, world, rank, region) != 0 or not tp.connect(lib, model, world, rank):
+    if lib.tf_h3_tp_init(model, f"{kind}:/{name}".encode(), 0, world, rank, region) != 0 or not tp.connect(lib, model, world, rank):
         say(-1, f"rank {rank}: tf_h3_tp_init failed")
         head.ready = 2
         return 1

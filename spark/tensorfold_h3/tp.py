@@ -83,7 +83,7 @@ def sweep():
 
 def unlink(name):
     base = "/dev/shm/" + name.lstrip("/")
-    for path in (base, base + ".ctl", base + ".box"):
+    for path in (base, base + ".ctl", base + ".p2p", base + ".box"):
         try:
             os.unlink(path)
         except OSError:
@@ -110,6 +110,8 @@ def bind(lib):
     lib.tf_h3_tp_connect.restype = ctypes.c_int
     lib.tf_h3_tp_connect.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint8 * 72)]
     lib.tf_h3_tp_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double * 3)]
+    if hasattr(lib, "tf_h3_tp_p2p"):
+        lib.tf_h3_tp_p2p.restype = ctypes.c_int
     if hasattr(lib, "tf_h3_profile"):
         lib.tf_h3_profile.argtypes = [ctypes.c_void_p, ctypes.c_int]
         lib.tf_h3_spent.restype = ctypes.c_int

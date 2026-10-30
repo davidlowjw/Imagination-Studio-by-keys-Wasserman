@@ -107,7 +107,14 @@ class World:
         int8 = path + ".tf-int8"
         if not os.path.exists(int8):
             raise RuntimeError(f"no int8 copy at {int8} for the second card (one render on one card writes it)")
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": rank_one_gpu(),
+        # the exchange: peer to peer (each GPU writes its tiles into the other's memory over PCIe) when the engine
+        # has it, else host shared memory; STUDIO_TP_EXCHANGE=shm|p2p|auto
+        self.kind = exchange_kind()
+        two = rank_one_gpu()
+        visible = [part.strip() for part in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if part.strip()]
+        # peer to peer opens rank 0's region on rank 0's card, so rank 1 sees that card too (its own still first: device 0)
+        cards = f"{two},{visible[0]}" if self.kind == "p2p" and visible and visible[0] != two else two
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": cards,
                "TF_H3_LIB": os.environ.get("TF_H3_LIB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "libtf_h3.so")}
         libc = ctypes.CDLL(None)
 
@@ -116,11 +123,11 @@ class World:
 
         mark = time.perf_counter()
         self.proc = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tp_rank.py"),
-                                      self.name, int8, str(self.region), "2", "1"], env=env, preexec_fn=die_with_parent)
-        if (library().tf_h3_tp_init(handle, f"shm:/{self.name}".encode(), 0, 2, 0, self.region) != 0
-                or not tp.connect(library(), handle, 2, 0)):
-            self.close(handle)
-            raise RuntimeError("tf_h3_tp_init failed on the first card")
+                                      self.name, int8, str(self.region), "2", "1", self.kind], env=env, preexec_fn=die_with_parent)
+        # this rank's region first (peer to peer: its IPC handle, which rank 1 opens before it says it is ready) ...
+        if library().tf_h3_tp_init(handle, f"{self.kind}:/{self.name}".encode(), 0, 2, 0, self.region) != 0:
+            self.close()
+            raise RuntimeError(f"tf_h3_tp_init ({self.kind}) failed on the first card")
         self.handle = handle
         while self.head.ready == 0:
             if self.proc.poll() is not None or time.perf_counter() - mark > 600:
@@ -131,8 +138,12 @@ class World:
             message = self.head.message.decode(errors="replace")
             self.close(handle)
             raise RuntimeError(message)
-        logging.info(f"TensorFold H3: two GPUs, rank 1 on CUDA device {env['CUDA_VISIBLE_DEVICES']} "
-                     f"({self.head.message.decode(errors='replace')}), exchange {self.region >> 20} MB in {self.name}")
+        # ... then rank 1's, published by now: connecting never waits on a rank that has gone
+        if not tp.connect(library(), handle, 2, 0):
+            self.close(handle)
+            raise RuntimeError(f"connecting rank 1 ({self.kind}) failed on the first card")
+        logging.info(f"TensorFold H3: two GPUs, rank 1 on CUDA device {cards} ({self.head.message.decode(errors='replace')}), "
+                     f"exchange {self.kind} {self.region >> 20} MB in {self.name}")
 
     def view(self, offset, dtype, count):
         return torch.frombuffer(self.box, dtype=dtype, count=count, offset=offset)
@@ -151,6 +162,14 @@ class World:
 
 _worlds = {}    # checkpoint path -> World, while ComfyUI runs
 _tp_off = set()  # checkpoint paths whose two-GPU world failed this session: one GPU for them from then on
+
+
+def exchange_kind():
+    """p2p when the engine has it (tf_h3_tp_p2p) and STUDIO_TP_EXCHANGE is not shm, else shm."""
+    wanted = os.environ.get("STUDIO_TP_EXCHANGE", "auto").strip().lower()
+    if wanted == "shm" or not hasattr(library(), "tf_h3_tp_p2p"):
+        return "shm"
+    return "p2p"
 
 
 def rank_one_gpu():
@@ -181,6 +200,11 @@ def world(path):
         try:
             _worlds[path] = World(path, engine(path))
         except Exception as error:  # noqa: BLE001
+            if exchange_kind() == "p2p":
+                # peer to peer refused (no P2P between these cards, IPC off): the host shared-memory exchange instead
+                logging.warning(f"TensorFold H3: the peer-to-peer exchange failed ({error}); trying shared memory")
+                os.environ["STUDIO_TP_EXCHANGE"] = "shm"
+                return world(path)
             logging.warning(f"TensorFold H3: two GPUs unavailable, one GPU from here: {error}")
             _tp_off.add(path)
             return None
