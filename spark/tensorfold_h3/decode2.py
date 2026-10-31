@@ -87,9 +87,15 @@ def _decode_temporal(self, z, output_buffer=None):
         pad_z = z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)
         z = torch.cat([z, pad_z], dim=2)
     home = z.device
+    from . import peer_copies_work  # the package's: copies between the cards checked once
+    direct = all(peer_copies_work(home.index, device.index) for device in copies if device != home)
+
+    def to(tensor, device):  # card to card, or through host memory where peer copies do not arrive intact
+        return tensor.to(device) if direct or tensor.device == device else tensor.cpu().to(device)
+
     free = model_management.get_free_memory(home)
     batch = int(max(1, min(4, free // (128 * 2**20 * z.shape[0]))))  # as the stock _decode_tile_row picks it
-    latents = {device: (z if device == home else z.to(device)) for device in copies}
+    latents = {device: (z if device == home else to(z, device)) for device in copies}
     grad, inference = torch.is_grad_enabled(), torch.is_inference_mode_enabled()
     results, errors, done = {}, [], {device: 0 for device in copies}
     ready = threading.Condition()
@@ -160,7 +166,7 @@ def _decode_temporal(self, z, output_buffer=None):
                 ready.notify_all()
             with _capturing:  # no GPU work of ours on a card while one records a graph
                 if clip_dec.device != home:
-                    clip_dec = clip_dec.to(home)
+                    clip_dec = to(clip_dec, home)
                 for j in range(split_count):
                     f_start_idx = j * chunk_dec
                     f_end_idx = min(f_start_idx + chunk_dec, clip_dec.shape[2])

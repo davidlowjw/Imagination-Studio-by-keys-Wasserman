@@ -18,6 +18,7 @@ import ctypes
 import logging
 import math
 import os
+import threading
 import time
 import uuid
 
@@ -179,6 +180,49 @@ def iommu_passthrough():
     return bool(gpus)
 
 
+_peer = {}  # (a, b) -> whether copies between CUDA devices a and b arrive intact
+
+
+def peer_copies_work(a=0, b=1):
+    """Whether torch's copies between CUDA devices a and b arrive intact both ways (checked once). With the IOMMU
+    translating (AMD-Vi / VT-d in DMA mode), or a PCIe path that drops peer writes, they report success and leave zeros
+    while the driver reports peer access: work for the other card then goes through host memory (docs/two-gpus.md)."""
+    key = (a, b)
+    if key not in _peer:
+        ok = False
+        if os.environ.get("STUDIO_PEER_COPIES", "auto").strip().lower() in ("0", "off", "no", "false"):
+            _peer[key] = False  # STUDIO_PEER_COPIES=off: every copy between the cards through host memory
+            return False
+        result, failure = [], []
+
+        def test():  # on a thread of its own: the engine's CUDA context may be current on the caller's
+            try:
+                if torch.cuda.device_count() > max(a, b):
+                    x = torch.randint(1, 255, (1 << 20,), dtype=torch.uint8, device=f"cuda:{a}")
+                    y = x.to(f"cuda:{b}")
+                    z = y.to(f"cuda:{a}")
+                    torch.cuda.synchronize(a)
+                    torch.cuda.synchronize(b)
+                    host = x.cpu()
+                    result.append(torch.equal(host, y.cpu()) and torch.equal(host, z.cpu()))
+            except Exception as error:  # noqa: BLE001
+                failure.append(error)
+
+        thread = threading.Thread(target=test, name="peer-copy-test")
+        thread.start()
+        thread.join()
+        ok = bool(result and result[0])
+        if failure:
+            logging.warning(f"TensorFold H3: the copy test between cuda:{a} and cuda:{b} failed: {failure[0]}")
+        if ok:
+            logging.info(f"TensorFold H3: copies between cuda:{a} and cuda:{b} checked, they arrive intact")
+        else:
+            logging.warning(f"TensorFold H3: copies between cuda:{a} and cuda:{b} do not arrive intact (an IOMMU in DMA "
+                            f"mode? boot with iommu=pt); the cards exchange through host memory")
+        _peer[key] = ok
+    return _peer[key]
+
+
 def exchange_kind():
     """STUDIO_TP_EXCHANGE: shm (kernels pack into and unpack out of the shared host region), dma (the same region,
     filled and read with bulk copy-engine copies; engine tf_h3_tp_dma) or p2p (GPU to GPU; engine tf_h3_tp_p2p).
@@ -186,9 +230,10 @@ def exchange_kind():
     wanted = os.environ.get("STUDIO_TP_EXCHANGE", "shm").strip().lower()
     lib = library()
     if wanted == "p2p" and hasattr(lib, "tf_h3_tp_p2p"):
-        if iommu_passthrough():
+        if iommu_passthrough() and peer_copies_work(0, 1):
             return "p2p"
-        logging.warning("TensorFold H3: STUDIO_TP_EXCHANGE=p2p but the IOMMU translates the GPUs (boot with iommu=pt); using dma")
+        if not iommu_passthrough():
+            logging.warning("TensorFold H3: STUDIO_TP_EXCHANGE=p2p but the IOMMU translates the GPUs (boot with iommu=pt); using dma")
         wanted = "dma"
     if wanted == "dma" and hasattr(lib, "tf_h3_tp_dma"):
         return "dma"
@@ -235,10 +280,13 @@ def world(path):
         try:
             _worlds[path] = World(path, engine(path))
         except Exception as error:  # noqa: BLE001
-            if exchange_kind() != "shm":
-                # dma or peer to peer refused: the plain shared-memory exchange instead
-                logging.warning(f"TensorFold H3: the {exchange_kind()} exchange failed ({error}); trying shared memory")
-                os.environ["STUDIO_TP_EXCHANGE"] = "shm"
+            kind = exchange_kind()
+            if kind != "shm":
+                # peer to peer refused (no P2P between these cards, as on GeForce): bulk copies through host memory;
+                # those refused too: the plain shared-memory exchange
+                fallback = "dma" if kind == "p2p" and hasattr(library(), "tf_h3_tp_dma") else "shm"
+                logging.warning(f"TensorFold H3: the {kind} exchange failed ({error}); trying {fallback}")
+                os.environ["STUDIO_TP_EXCHANGE"] = fallback
                 return world(path)
             logging.warning(f"TensorFold H3: two GPUs unavailable, one GPU from here: {error}")
             _tp_off.add(path)
