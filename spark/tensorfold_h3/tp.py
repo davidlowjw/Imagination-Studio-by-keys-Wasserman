@@ -28,7 +28,9 @@ class Inputs(ctypes.Structure):
                 ("lines", ctypes.c_uint32), ("rot", ctypes.c_uint32), ("tiles", ctypes.c_uint32),
                 ("prefix_tiles", ctypes.c_uint32), ("keep", ctypes.c_uint32), ("blocks", ctypes.c_uint32),
                 ("attention_out", ctypes.c_uint64), ("tile0", ctypes.c_uint32), ("tile1", ctypes.c_uint32),
-                ("cuts", ctypes.c_uint32 * 9)]
+                ("cuts", ctypes.c_uint32 * 9),
+                # peer to peer (engine tf_h3_tp_chunks): the q k v work in parts, rows tile by tile
+                ("chunks", ctypes.c_uint32), ("chunk_rows", ctypes.c_uint32 * 9)]
 
 
 class Header(ctypes.Structure):
@@ -41,7 +43,9 @@ class Header(ctypes.Structure):
                 # byte offsets in the mailbox of x, tables, line, cos, sin, slot, sizes
                 ("at", ctypes.c_uint64 * 7), ("message", ctypes.c_char * 512),
                 # TF_H3_PROFILE=1: rank 1's last pass, as tf_h3_spent and tf_h3_tp_stats report it
-                ("spent", ctypes.c_double * 16), ("spent_n", ctypes.c_uint32), ("tp_stats", ctypes.c_double * 3)]
+                ("spent", ctypes.c_double * 16), ("spent_n", ctypes.c_uint32), ("tp_stats", ctypes.c_double * 3),
+                # Inputs.chunks and chunk_rows for rank 1's rows
+                ("chunks", ctypes.c_uint32), ("chunk_rows", ctypes.c_uint32 * 9)]
 
 
 def open_box(name, create):
@@ -112,6 +116,8 @@ def bind(lib):
     lib.tf_h3_tp_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double * 3)]
     if hasattr(lib, "tf_h3_tp_p2p"):
         lib.tf_h3_tp_p2p.restype = ctypes.c_int
+    if hasattr(lib, "tf_h3_tp_chunks"):
+        lib.tf_h3_tp_chunks.restype = ctypes.c_int
     if hasattr(lib, "tf_h3_profile"):
         lib.tf_h3_profile.argtypes = [ctypes.c_void_p, ctypes.c_int]
         lib.tf_h3_spent.restype = ctypes.c_int
@@ -132,3 +138,13 @@ STAGES = ("norms", "q k v gate", "heads", "routing", "attention", "gate mix", "a
 
 def spent_line(values, n, names=STAGES):
     return ", ".join(f"{names[i] if i < len(names) else i} {values[i]:.2f}" for i in range(n))
+
+
+def chunk_rows(sizes, lo, hi, chunks):
+    """Inputs.chunk_rows for a rank owning tiles [lo, hi) whose rows come tile by tile: the first row of each of the
+    `chunks` parts the engine cuts the range into (lo + n * c // chunks), then the rank's row count."""
+    n = hi - lo
+    ends = [0]
+    for tile in sizes[lo:hi]:
+        ends.append(ends[-1] + int(tile))
+    return [ends[n * c // chunks] for c in range(chunks + 1)]

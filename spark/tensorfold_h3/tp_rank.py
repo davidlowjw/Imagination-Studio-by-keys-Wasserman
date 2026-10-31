@@ -60,6 +60,9 @@ def main():
                            tile0=head.tile0, tile1=head.tile1)
         for i in range(9):
             inputs.cuts[i] = head.cuts[i]
+        inputs.chunks = head.chunks
+        for i in range(9):
+            inputs.chunk_rows[i] = head.chunk_rows[i]
         profile = os.environ.get("TF_H3_PROFILE") == "1" and hasattr(lib, "tf_h3_profile")
         if profile:
             lib.tf_h3_profile(model, 1)

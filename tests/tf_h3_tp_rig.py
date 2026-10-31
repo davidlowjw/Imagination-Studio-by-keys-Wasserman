@@ -95,6 +95,15 @@ class World:
         cut = max(1, min(cut, tiles - 1))  # RIG_CUT_SHIFT: move the split (output must not depend on it)
         mask = slot.to(torch.int64) // TILE >= cut
         own = [torch.nonzero(~mask).flatten(), torch.nonzero(mask).flatten()]
+        chunks = int(os.environ.get("RIG_CHUNKS", "0")) if self.kind == "p2p" and t["keep"] > 0 else 0
+        rows_at = [[0] * 9, [0] * 9]
+        if chunks >= 2 or os.environ.get("RIG_SORT_ROWS", "0") == "1":  # each rank's rows tile by tile (slot order)
+            own = [o[torch.argsort(slot.to(torch.int64)[o])] for o in own]
+        if chunks >= 2:
+            for r in range(2):
+                rows_at[r][:chunks + 1] = tp.chunk_rows(sizes.tolist(), [0, cut, tiles][r], [0, cut, tiles][r + 1], chunks)
+        else:
+            chunks = 0
         cuts = [0, cut, tiles]
         hidden = h0.shape[1]
         head = self.head
@@ -111,12 +120,17 @@ class World:
         head.prefix_tiles, head.keep, head.blocks, head.tile0, head.tile1 = t["prefix"], t["keep"], blocks, cut, tiles
         for k in range(9):
             head.cuts[k] = cuts[k] if k < 3 else 0
+            head.chunk_rows[k] = rows_at[1][k]
+        head.chunks = chunks
         job = (head.job + 1) & 0xffffffff
         head.job = job
         mine = [h0.index_select(0, own[0]).contiguous(), t["line"].index_select(0, own[0]).contiguous(),
                 t["cos"].index_select(0, own[0]).contiguous(), t["sin"].index_select(0, own[0]).contiguous(),
                 slot.index_select(0, own[0]).contiguous()]
         i = inputs_for(t, mine[0], own[0].numel(), blocks, mine[1], mine[2], mine[3], mine[4], 0, cut, cuts)
+        i.chunks = chunks
+        for k in range(9):
+            i.chunk_rows[k] = rows_at[0][k]
         torch.cuda.synchronize()
         took = self.lib.tf_h3_forward(self.handle, ctypes.byref(i))
         mark = time.perf_counter()

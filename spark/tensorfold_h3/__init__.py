@@ -195,6 +195,18 @@ def exchange_kind():
     return "shm"
 
 
+def tp_chunks(w, keep):
+    """The parts a peer-to-peer pass's q k v work is cut into (STUDIO_TP_CHUNKS, default 4, at most 8); 0 for one part:
+    another exchange, dense attention, or an engine without tf_h3_tp_chunks."""
+    try:
+        wanted = int(os.environ.get("STUDIO_TP_CHUNKS", "4"))
+    except ValueError:
+        wanted = 4
+    if wanted < 2 or keep <= 0 or getattr(w, "kind", "") != "p2p" or not hasattr(library(), "tf_h3_tp_chunks"):
+        return 0
+    return min(wanted, 8)
+
+
 def rank_one_gpu():
     """The second card for rank 1, as CUDA_VISIBLE_DEVICES names it: STUDIO_TP_GPU, else the second of the cards this
     ComfyUI was pinned to (spark/gpu.sh, STUDIO_GPUS: the head's first), else index 1."""
@@ -453,6 +465,16 @@ class Blocks:
         mask = tile_of >= cut
         own = [torch.nonzero(~mask).flatten(), torch.nonzero(mask).flatten()]
         cuts = [0, cut, tiles]
+        # peer to peer, sparse: the engine does each rank's q k v work in parts and sends a part while it computes the
+        # next (STUDIO_TP_CHUNKS, default 4; 0 or 1: one part). It needs each rank's rows tile by tile (slot order);
+        # the row order changes no bits (the kernels are row-wise and the int8 products exact).
+        chunks = tp_chunks(w, keep)
+        rows_at = [[0] * 9, [0] * 9]
+        if chunks:
+            own = [o[torch.argsort(slot.to(torch.int64)[o])] for o in own]
+            host_sizes = sizes.tolist()
+            for r in range(2):
+                rows_at[r][:chunks + 1] = tp.chunk_rows(host_sizes, cuts[r], cuts[r + 1], chunks)
         hidden = h.shape[1]
         # rank 1's job: its rows and the pass's tables and tile sizes, in the mailbox
         head, base = w.head, w.base
@@ -473,6 +495,8 @@ class Blocks:
         head.prefix_tiles, head.keep, head.blocks, head.tile0, head.tile1 = prefix, keep, 0, cut, tiles
         for i in range(9):
             head.cuts[i] = cuts[i] if i < 3 else 0
+            head.chunk_rows[i] = rows_at[1][i]
+        head.chunks = chunks
         job = (head.job + 1) & 0xffffffff
         head.job = job
         clock.append(time.perf_counter())  # rank 1's job in the mailbox
@@ -486,6 +510,8 @@ class Blocks:
                         attention_out=0, tile0=0, tile1=cut)
         for i in range(9):
             inputs.cuts[i] = cuts[i] if i < 3 else 0
+            inputs.chunk_rows[i] = rows_at[0][i]
+        inputs.chunks = chunks
         torch.cuda.synchronize()
         clock.append(time.perf_counter())  # rank 0's rows ready
         took = library().tf_h3_forward(handle, ctypes.byref(inputs))
@@ -513,7 +539,7 @@ class Blocks:
                      f"+ own rows {d[1]:.3f} + rank 0 forward {d[2]:.2f} + waiting for rank 1 {d[3]:.3f} "
                      f"+ write back {d[4]:.3f}; exchanges rank 0 {mine_x[0]:.2f} s in {int(mine_x[1])} "
                      f"(packing {mine_x[2]:.2f}), rank 1 {theirs_x[0]:.2f} s in {int(theirs_x[1])} (packing {theirs_x[2]:.2f}); "
-                     f"rank 1 forward {head.took:.2f} s; cut at tile {cut}, {moved:.0f} rows moved to rank 1")
+                     f"rank 1 forward {head.took:.2f} s; cut at tile {cut}, {moved:.0f} rows moved to rank 1; {chunks or 1} parts")
             if head.spent_n:
                 line_ += f"; rank 1 stages: {tp.spent_line(head.spent, head.spent_n)}"
             logging.info(line_)
