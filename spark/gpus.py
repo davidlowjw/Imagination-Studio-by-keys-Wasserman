@@ -111,7 +111,7 @@ def place(workflow: dict) -> dict:
             if (key, slot) not in placed:
                 routes[(key, slot)] = ("SelectVAEDevice", "vae", f"gpu:{decoder_gpu()}")
     if not routes:
-        return place_layers(out) if layer_split() else out
+        return place_decode(place_layers(out) if layer_split() else out)
     new_ids = {}
     for (key, slot), (kind, field, device) in routes.items():
         new_id = str(next_id)
@@ -124,7 +124,44 @@ def place(workflow: dict) -> dict:
         for name, value in node["inputs"].items():
             if isinstance(value, list) and len(value) == 2 and (str(value[0]), value[1]) in new_ids:
                 node["inputs"][name] = [new_ids[(str(value[0]), value[1])], 0]
-    return place_layers(out) if layer_split() else out
+    return place_decode(place_layers(out) if layer_split() else out)
+
+
+def decode_split() -> bool:
+    """Whether a MiniMax H3 video decode runs on two cards (STUDIO_DECODE_SPLIT, on by default with two cards)."""
+
+    wanted = os.environ.get("STUDIO_DECODE_SPLIT", "on").strip().lower()
+    return wanted not in ("0", "off", "no", "false") and split()
+
+
+def place_decode(out: dict) -> dict:
+    """Each VAEDecode of the MiniMax H3 video VAE on the decoder's card becomes StudioTwoCardVAEDecode
+    (spark/tensorfold_h3/decode2.py) with a second copy of the VAE on another card: the decoder's temporal chunks
+    alternate between the two, blended in order on the decoder's card (byte for byte the one-card output)."""
+
+    if not decode_split():
+        return out
+    home = f"gpu:{decoder_gpu()}"
+    others = [index for index in range(len(cards())) if index != decoder_gpu()]
+    if not others:
+        return out
+    next_id = max((int(key) for key in out if str(key).isdigit()), default=0) + 1
+    for key, node in list(out.items()):
+        if node.get("class_type") != "VAEDecode":
+            continue
+        ref = node["inputs"].get("vae")
+        select = out.get(str(ref[0])) if isinstance(ref, list) and len(ref) == 2 else None
+        if not select or select.get("class_type") != "SelectVAEDevice" or select["inputs"].get("device") != home:
+            continue
+        source = select["inputs"].get("vae")
+        loader = out.get(str(source[0])) if isinstance(source, list) and len(source) == 2 else None
+        if not loader or loader.get("class_type") != "VAELoader" or "h3_video_vae" not in str(loader["inputs"].get("vae_name", "")):
+            continue
+        twin = str(next_id)
+        next_id += 1
+        out[twin] = {"class_type": "SelectVAEDevice", "inputs": {"vae": list(source), "device": f"gpu:{others[0]}"}}
+        out[key] = {"class_type": "StudioTwoCardVAEDecode", "inputs": {**node["inputs"], "vae_other": [twin, 0]}}
+    return out
 
 
 def layer_split() -> bool:

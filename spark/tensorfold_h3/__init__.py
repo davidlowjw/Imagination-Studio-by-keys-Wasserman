@@ -732,3 +732,10 @@ class TensorFoldH3Blocks:
 
 NODE_CLASS_MAPPINGS = {"TensorFoldH3Blocks": TensorFoldH3Blocks}
 NODE_DISPLAY_NAME_MAPPINGS = {"TensorFoldH3Blocks": "TensorFold H3 Blocks (CUDA int8)"}
+
+try:  # the two-card video decode (decode2.py): a failure there must not take the engine's node with it
+    from . import decode2
+    NODE_CLASS_MAPPINGS.update(decode2.NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(decode2.NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as error:  # noqa: BLE001
+    logging.warning(f"Studio two-card decode unavailable: {error}")
