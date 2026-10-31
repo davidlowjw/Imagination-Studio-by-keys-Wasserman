@@ -352,6 +352,23 @@ def cosine(a, b):
     return float(torch.dot(a, b) / (a.norm() * b.norm()))
 
 
+_moved = {}  # (tiles, rows) of a pass -> rows moved from rank 0's half to rank 1's, learned from the passes' waits
+
+
+def balance(key, moved, mine, theirs, took1, rows1, rows):
+    """After a two-GPU pass: move rows towards the rank that waited longer for the other's tiles. A rank's wait is its
+    exchange time less its sending (tp.stats); its compute is its forward less that wait. STUDIO_TP_BALANCE=off keeps
+    the even split."""
+    if os.environ.get("STUDIO_TP_BALANCE", "on").strip().lower() in ("0", "off", "no", "false"):
+        return
+    wait0, wait1 = mine[0] - mine[2], theirs[0] - theirs[2]
+    compute1 = took1 - wait1
+    if rows1 <= 0 or compute1 <= 0 or abs(wait1 - wait0) < 0.02:
+        return
+    step = (wait1 - wait0) / (2 * compute1 / rows1)  # rows whose compute closes half the gap on each side
+    _moved[key] = max(-rows / 4, min(rows / 4, moved + 0.7 * step))
+
+
 class Blocks:
     """One patched model's state: the engine, and what stays the same through a sampling run."""
 
@@ -426,7 +443,11 @@ class Blocks:
         tiles = sizes.shape[0]
         clock = [time.perf_counter()]
         cum = torch.cumsum(sizes.to(torch.int64), 0)
-        cut = int(torch.searchsorted(cum, cum[-1] // 2).item()) + 1
+        # half the rows each, less the rows the earlier passes of this shape moved to rank 1 (balance()): rank 0 also
+        # holds the prefix tiles, whose queries see every tile. The output does not depend on the cut.
+        key = (tiles, h.shape[0])
+        moved = _moved.get(key, 0.0)
+        cut = int(torch.searchsorted(cum, max(1, int(cum[-1]) // 2 - int(moved))).item()) + 1
         cut = max(1, min(cut, tiles - 1))
         tile_of = slot.to(torch.int64) // TILE
         mask = tile_of >= cut
@@ -482,16 +503,17 @@ class Blocks:
         theirs = w.view(offsets[0], torch.bfloat16, own[1].numel() * hidden).view(-1, hidden).to(h.device)
         h.index_copy_(0, own[0], mine[0])
         h.index_copy_(0, own[1], theirs)
+        mine_x, theirs_x = tp.stats(library(), handle), tuple(head.tp_stats)
+        balance(key, moved, mine_x, theirs_x, head.took, own[1].numel(), h.shape[0])
         if os.environ.get("TF_H3_PROFILE") == "1" or self.passes == 0:
             torch.cuda.synchronize()
             clock.append(time.perf_counter())  # h written back
             d = [b - a for a, b in zip(clock, clock[1:])]
-            mine_x, theirs_x = tp.stats(library(), handle), tuple(head.tp_stats)
             line_ = (f"TensorFold H3 two-GPU pass {self.passes + 1}: {clock[-1] - clock[0]:.2f} s = mailbox {d[0]:.3f} "
                      f"+ own rows {d[1]:.3f} + rank 0 forward {d[2]:.2f} + waiting for rank 1 {d[3]:.3f} "
                      f"+ write back {d[4]:.3f}; exchanges rank 0 {mine_x[0]:.2f} s in {int(mine_x[1])} "
                      f"(packing {mine_x[2]:.2f}), rank 1 {theirs_x[0]:.2f} s in {int(theirs_x[1])} (packing {theirs_x[2]:.2f}); "
-                     f"rank 1 forward {head.took:.2f} s")
+                     f"rank 1 forward {head.took:.2f} s; cut at tile {cut}, {moved:.0f} rows moved to rank 1")
             if head.spent_n:
                 line_ += f"; rank 1 stages: {tp.spent_line(head.spent, head.spent_n)}"
             logging.info(line_)
