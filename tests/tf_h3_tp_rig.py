@@ -91,7 +91,8 @@ class World:
         sizes, slot = t["sizes"], t["slot"]
         tiles = sizes.shape[0]
         cum = torch.cumsum(sizes.to(torch.int64), 0)
-        cut = max(1, min(int(torch.searchsorted(cum, cum[-1] // 2).item()) + 1, tiles - 1))
+        cut = int(torch.searchsorted(cum, cum[-1] // 2).item()) + 1 + int(os.environ.get("RIG_CUT_SHIFT", "0"))
+        cut = max(1, min(cut, tiles - 1))  # RIG_CUT_SHIFT: move the split (output must not depend on it)
         mask = slot.to(torch.int64) // TILE >= cut
         own = [torch.nonzero(~mask).flatten(), torch.nonzero(mask).flatten()]
         cuts = [0, cut, tiles]
