@@ -18,27 +18,27 @@ on a 15 s clip (the memory guard refuses it on a 48 GB card); two cards peak nea
 
 ## What it needs
 
-- **Two NVIDIA cards of the same model with room for the whole model each.** Each card holds a whole copy of the int8
-  blocks (21 GB) besides its share of the pass: a 15 s clip peaks near 42 GB a card on 48 GB cards. Smaller cards are
-  untested. Two cards are used; a third is not.
-- **A TensorFold engine with the two-GPU exchange.** The pinned engine (`spark/build-engine.sh`) has none: the
-  exchange is TensorFold `studio-two-gpus` (https://github.com/davidlowjw/TensorFold/tree/studio-two-gpus, one commit
-  on `upstream/h3-cuda-parallel`). Build it for the card and put it in place of the installed library:
+- **Two NVIDIA cards of the same model, 40 GB or more each** (the install pairs them only then). Each card holds a
+  whole copy of the int8 blocks (21 GB) besides its share of the pass: a 15 s clip peaks near 42 GB a card on 48 GB
+  cards. Two cards are used; a third is not.
+- **A TensorFold engine with the two-GPU exchange.** The pinned engine (`TF_COMMIT` in `spark/build-engine.sh`) has
+  none: the exchange is TensorFold `studio-two-gpus` (https://github.com/davidlowjw/TensorFold/tree/studio-two-gpus,
+  one commit on `upstream/h3-cuda-parallel`). `spark/build-engine.sh` builds a checkout for the card it finds:
 
   ```bash
-  cd TensorFold && git checkout studio-two-gpus
-  zig build tf-h3 -Doptimize=ReleaseFast -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=$(nvidia-smi -i 0 --query-gpu=compute_cap --format=csv,noheader | tr -d .)
-  cp zig-out/lib/libtf_h3.so "$PREFIX/tf-h3/libtf_h3.so.new" && mv -f "$PREFIX/tf-h3/libtf_h3.so.new" "$PREFIX/tf-h3/libtf_h3.so"
+  git clone -b studio-two-gpus https://github.com/davidlowjw/TensorFold.git
+  TF_SOURCE="$PWD/TensorFold" PREFIX=/path/to/the/install bash spark/build-engine.sh  # the PREFIX it was installed with
   ```
 
   With an engine that lacks it the Studio renders on one card and says so in the ComfyUI log; nothing else changes.
+  An upgrade builds the pinned engine again: build this one again after it.
 - **For the fastest exchange, PCIe peer to peer that works.** On a desktop with the IOMMU in DMA mode (AMD-Vi or VT-d;
   `cat /sys/kernel/iommu_groups/*/type` says `DMA` or `DMA-FQ` for the cards' groups) copies between the cards report
   success and move nothing, though the driver says peer access is supported (CUDA's programming guide: peer to peer
   is not supported on bare-metal Linux with the IOMMU on). Boot with `iommu=pt` (`GRUB_CMDLINE_LINUX_DEFAULT`, then
   `update-grub` and a reboot) or turn the IOMMU off. GeForce cards have peer to peer off in the driver. Either way the
   Studio checks before it uses peer copies (the cards' IOMMU groups, then a copy each way between them) and otherwise
-  exchanges through host memory: correct, a little slower (5 s clip 47.4 s against 42.7 s before the overlap below).
+  exchanges through host memory: correct, a little slower (a 15 s clip 164.8 s against 146.3 s).
 
 ## Turning it on
 
@@ -91,7 +91,7 @@ workers (one card a worker), which would end the pairing.
 
 - Two cards of one model. Different models of one architecture should work (the split and the decode adapt to
   speed) but are untested; cards of different architectures cannot share one engine build.
-- The memory guard adds the cards' memory together, while each card holds the whole weights: on smaller cards it can
-  admit a clip that does not fit. On 48 GB cards set `STUDIO_ROOM_MB` (the guard reckons a 96 GB card).
+- The memory guard adds the cards' memory together, while each card holds the whole weights: near the 40 GB floor it
+  can admit a clip that does not fit.
 - A LoRA clip renders on one card (the second card holds the checkpoint's weights).
 - A long video's parts still run one after another (each opens on the last frame of the one before).
